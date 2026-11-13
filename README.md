@@ -40,7 +40,8 @@ Design in Figma, press **Publish** in the plugin, present here.
 
 ## Known limits
 
-- Transitions: smart animate and dissolve are implemented; other styles fall back to dissolve.
-- Smart animate matches layers by name and position in the layer tree; rotation is not tweened.
+- Object animations inside a slide (appear on click and so on) are not published: Figma does not expose them to plugins.
+- Video files cannot be read by a plugin either; the presenter asks for each video file once and stores it in the decks repository.
+- Smart animate matches layers by name and position in the layer tree. Position, size, rotation and shader settings are tweened; other changes cross-fade.
 - Blend modes other than normal, multiply, screen and add are approximated.
 - Only the first shader effect on a layer is used.

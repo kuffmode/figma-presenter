@@ -155,6 +155,8 @@ async function upload(deck, warnings) {
   const missing = Object.keys(deck.shaders).filter(v => !existing.has(`shaders/${v}.js`));
   const notes = [...warnings];
   if (missing.length) notes.push(`Shader code not yet in the repository for: ${missing.map(v => deck.shaders[v].name || v.slice(0, 8)).join(", ")}. The presenter will ask for it.`);
+  const noVideo = Object.keys(deck.videos || {}).filter(h => ![...existing.keys()].some(path => path.startsWith(`videos/${h}`)));
+  if (noVideo.length) notes.push(`Video file not yet in the repository for: ${noVideo.map(h => deck.videos[h].name).join(", ")}. Figma does not let plugins read video files; the presenter will ask for the file once.`);
   status(`Published ${deck.slides.length} slides (${todo.length} new upload${todo.length === 1 ? "" : "s"}).`, 1);
   $("log").textContent = notes.join("\n");
 }

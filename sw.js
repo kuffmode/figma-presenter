@@ -1,5 +1,5 @@
 // Keeps the app itself available offline. Deck data lives in IndexedDB, not here.
-const CACHE = "presenter-shell-v1";
+const CACHE = "presenter-shell-v2";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "app/style.css", "app/main.js", "app/engine.js", "app/easing.js", "app/store.js", "app/gh.js"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });

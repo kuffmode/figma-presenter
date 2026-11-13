@@ -53,6 +53,28 @@ async function shaderSource(version) {
   return src || null;
 }
 
+const VIDEO_TYPES = { mp4: "video/mp4", m4v: "video/mp4", mov: "video/quicktime", webm: "video/webm" };
+let videoListing = null;
+async function videoInfo(hash) {
+  let info = await store.get("kv", "video:" + hash);
+  if (!info && navigator.onLine && config.token) {
+    videoListing ??= await repo().list("videos").catch(() => []);
+    const file = videoListing.find(f => f.name.startsWith(hash));
+    if (file) { info = { sha: file.sha, type: VIDEO_TYPES[file.name.split(".").pop().toLowerCase()] || "video/mp4" }; await store.set("kv", "video:" + hash, info); }
+  }
+  return info || null;
+}
+async function videoElement(hash) {
+  const info = await videoInfo(hash);
+  if (!info) return null;
+  const el = document.createElement("video");
+  el.src = URL.createObjectURL(new Blob([await blobBytes(info.sha)], { type: info.type }));
+  el.playsInline = true; el.preload = "auto";
+  el.onplay = el.onseeked = () => redraw();
+  await new Promise(resolve => { el.onloadeddata = resolve; el.onerror = resolve; setTimeout(resolve, 8000); });
+  return el.readyState >= 2 ? el : null;
+}
+
 const thumbUrls = new Map();
 async function thumbUrl(deck, index) {
   const name = deck.slides[index] && deck.slides[index].thumb;
@@ -136,7 +158,10 @@ async function openDeck(deck) {
   show("loading");
   $("load-title").textContent = deck.name;
   try {
-    const shas = deckBlobs(deck), have = new Set(await store.keys("blobs"));
+    videoListing = null;
+    const videoHashes = Object.keys(deck.videos || {});
+    const videoInfos = await Promise.all(videoHashes.map(h => videoInfo(h).catch(() => null)));
+    const shas = [...deckBlobs(deck), ...videoInfos.filter(Boolean).map(i => i.sha)], have = new Set(await store.keys("blobs"));
     const missing = shas.filter(s => !have.has(s));
     let done = 0;
     const progress = () => { $("load-bar").style.width = (missing.length ? done / missing.length * 100 : 100) + "%"; $("load-text").textContent = missing.length ? `Downloading ${done} of ${missing.length}` : "Preparing…"; };
@@ -154,15 +179,16 @@ async function openDeck(deck) {
     P.engine.setDeck(deck, {
       bitmap: async name => createImageBitmap(await assetBlob(deck, name), { premultiplyAlpha: "premultiply" }),
       shaderSource,
+      video: videoElement,
     });
     show("present");
     layout();
     await P.engine.prepare(windowAround(P.index));
     // Warm the first transition so nothing is compiled while it plays.
     const next = firstVisible(P.index + 1, 1);
-    if (next !== P.index) P.engine.draw(P.index, next, 0.5, transitionFor(P.index, next).style, 0);
-    redraw();
-    reportMissingShaders();
+    if (next !== P.index) P.engine.draw(P.index, next, 0.5, styleOf(transitionFor(P.index, next)), 0);
+    enterSlide();
+    reportMissing(videoHashes.filter((h, i) => !videoInfos[i]));
     broadcast();
   } catch (err) {
     console.error(err);
@@ -170,27 +196,49 @@ async function openDeck(deck) {
   }
 }
 
-function reportMissingShaders() {
-  const missing = P.engine.missingShaders();
-  if (!missing.length) return;
-  const names = missing.map(v => (P.deck.shaders && P.deck.shaders[v] && P.deck.shaders[v].name) || v.slice(0, 8));
-  toast(`Shader code not found for: ${names.join(", ")}. Those layers are shown without the effect.`, { label: "Add shader file", run: () => addShaderFiles(missing, names) });
+// Things the plugin cannot read from Figma (shader code, video files) are added here once.
+function reportMissing(missingVideos) {
+  const shaders = P.engine.missingShaders();
+  if (!shaders.length && !missingVideos.length) return;
+  const sName = v => (P.deck.shaders && P.deck.shaders[v] && P.deck.shaders[v].name) || v.slice(0, 8);
+  const vName = h => (P.deck.videos[h] && P.deck.videos[h].name) || h.slice(0, 8);
+  const parts = [];
+  if (shaders.length) parts.push(`shader code for ${shaders.map(sName).join(", ")}`);
+  if (missingVideos.length) parts.push(`the video file for ${missingVideos.map(vName).join(", ")}`);
+  toast(`Not in the decks repository yet: ${parts.join("; ")}. Shown without it for now.`, { label: "Add files", run: async () => {
+    for (const v of shaders) if (!await addFile(`Choose the code file for the shader “${sName(v)}”`, ".js,.ts,.mjs,text/javascript,text/plain", f => addShader(v, f))) return;
+    for (const h of missingVideos) if (!await addFile(`Choose the video file for “${vName(h)}”`, "video/*,.mp4,.mov,.webm,.m4v", f => addVideo(h, f))) return;
+    P.engine.modules.clear();
+    openDeck(P.deck);
+  } });
 }
 
-async function addShaderFiles(versions, names) {
-  for (let i = 0; i < versions.length; i++) {
-    const file = await new Promise(resolve => {
-      const input = document.createElement("input"); input.type = "file"; input.accept = ".js,.ts,.mjs,text/javascript,text/plain";
-      input.onchange = () => resolve(input.files[0] || null); input.oncancel = () => resolve(null);
-      toast(`Choose the code file for “${names[i]}”`, { label: "Choose file", run: () => input.click() });
-    });
-    if (!file) return;
-    const source = await file.text();
-    try { await repo().putShader(versions[i], source); await store.set("kv", "shader:" + versions[i], source); }
-    catch (err) { toast("Could not save the shader: " + err.message); return; }
-  }
-  P.engine.modules.clear();
-  openDeck(P.deck);
+function addFile(prompt, accept, save) {
+  return new Promise(resolve => {
+    const input = document.createElement("input"); input.type = "file"; input.accept = accept;
+    input.oncancel = () => resolve(false);
+    input.onchange = async () => {
+      if (!input.files[0]) return resolve(false);
+      toast("Uploading " + input.files[0].name + "…");
+      try { await save(input.files[0]); resolve(true); }
+      catch (err) { toast("Could not save the file: " + err.message); resolve(false); }
+    };
+    toast(prompt, { label: "Choose file", run: () => input.click() });
+  });
+}
+
+async function addShader(version, file) {
+  const source = await file.text();
+  await repo().putShader(version, source);
+  await store.set("kv", "shader:" + version, source);
+}
+
+async function addVideo(hash, file) {
+  const buffer = await file.arrayBuffer();
+  const ext = (file.name.split(".").pop() || "mp4").toLowerCase();
+  const sha = await repo().putFile(`videos/${hash}.${ext}`, new Uint8Array(buffer), `Add video ${file.name}`);
+  await store.set("blobs", sha, buffer);
+  await store.set("kv", "video:" + hash, { sha, type: file.type || VIDEO_TYPES[ext] || "video/mp4" });
 }
 
 const windowAround = i => [i - 1, i, i + 1, i + 2];
@@ -211,6 +259,16 @@ function layout() {
   if (!P.anim) redraw();
 }
 
+const styleOf = tr => tr.style || "NONE";
+
+// Called whenever a slide becomes the current one.
+function enterSlide() {
+  for (const v of P.engine.videos.values()) if (v.el) v.el.pause();
+  for (const { el } of P.engine.videoElements(P.index)) { el.currentTime = 0; el.play().catch(() => {}); }
+  $("tb-count").textContent = `${P.index + 1} / ${P.deck.slides.length}`;
+  redraw();
+}
+
 function redraw() {
   if (P.anim) return;
   P.engine.draw(P.index, P.index, 0, "SMART_ANIMATE", performance.now());
@@ -220,7 +278,7 @@ function redraw() {
 
 async function go(target) {
   if (!P.deck || P.busy) return;
-  if (P.anim) { cancelAnimationFrame(P.anim.raf); P.index = P.anim.to; P.anim = null; }
+  if (P.anim) { cancelAnimationFrame(P.anim.raf); P.index = P.anim.to; P.anim = null; enterSlide(); }
   target = Math.min(Math.max(target, 0), P.deck.slides.length - 1);
   if (target === P.index) return;
   const from = P.index;
@@ -230,9 +288,10 @@ async function go(target) {
   P.busy = false;
   const tr = transitionFor(from, target);
   const adjacent = Math.abs(target - from) === 1 || P.deck.slides.slice(Math.min(from, target) + 1, Math.max(from, target)).every(s => s.skipped);
-  if (!adjacent || tr.style === "NONE" || !(tr.duration > 0)) { P.index = target; redraw(); broadcast(); return; }
+  if (!adjacent || styleOf(tr) === "NONE" || !(tr.duration > 0)) { P.index = target; enterSlide(); broadcast(); return; }
   cancelAnimationFrame(P.loop);
-  const style = tr.style === "SMART_ANIMATE" ? "SMART_ANIMATE" : "DISSOLVE";
+  const style = styleOf(tr);
+  for (const v of P.engine.videos.values()) if (v.el) v.el.pause();
   const ease = curve(tr.curve, tr.duration), start = performance.now();
   // Going back plays the same transition in reverse.
   const [a, b, reverse] = target > from ? [from, target, false] : [target, from, true];
@@ -242,7 +301,7 @@ async function go(target) {
     const dt = now - last; last = now;
     if (stats.frames++ > 0) { stats.sum += dt; stats.max = Math.max(stats.max, dt); if (dt > 20) stats.slow++; }
     const sec = (now - start) / 1000;
-    if (sec >= tr.duration) { P.anim = null; P.index = target; redraw(); showStats(stats); return; }
+    if (sec >= tr.duration) { P.anim = null; P.index = target; enterSlide(); showStats(stats); return; }
     const g = ease(sec);
     P.engine.draw(a, b, reverse ? 1 - g : g, style, now);
     P.anim.raf = requestAnimationFrame(step);
@@ -309,16 +368,37 @@ function drawLaser(now) {
 let cursorTimer;
 $("view-present").addEventListener("mousemove", e => {
   const view = $("view-present");
-  if (P.laserOn && P.stageBox) {
+  if (P.laserOn && P.stageBox && !$("toolbar").contains(e.target)) {
     const p = { x: (e.clientX - P.stageBox.x) / P.stageBox.w, y: (e.clientY - P.stageBox.y) / P.stageBox.h, t: performance.now() };
     P.laserHold = p; laserPoint(p.x, p.y);
-    return;
+    if (e.clientY > 90) { view.classList.remove("pointer"); return; }
   }
   view.classList.add("pointer");
   clearTimeout(cursorTimer);
-  cursorTimer = setTimeout(() => view.classList.remove("pointer"), 1800);
+  cursorTimer = setTimeout(() => { if (!$("toolbar").matches(":hover")) view.classList.remove("pointer"); }, 2200);
 });
-$("view-present").addEventListener("click", () => next());
+$("view-present").addEventListener("click", e => {
+  // Clicking a video plays or pauses it, as in Figma; anywhere else moves on.
+  if (P.stageBox && !P.anim) {
+    const x = (e.clientX - P.stageBox.x) / P.stageBox.w * P.deck.width, y = (e.clientY - P.stageBox.y) / P.stageBox.h * P.deck.height;
+    const hit = P.engine.videoElements(P.index).reverse().find(({ layer: l }) => x >= l.rect[0] && x <= l.rect[0] + l.rect[2] && y >= l.rect[1] && y <= l.rect[1] + l.rect[3]);
+    if (hit) { hit.el.paused || hit.el.ended ? hit.el.play().catch(() => {}) : hit.el.pause(); redraw(); return; }
+  }
+  next();
+});
+
+const actions = {
+  full: () => { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); },
+  notes: () => window.open(location.pathname + "?presenter", "figma-presenter-notes", "width=1180,height=760"),
+  laser: () => { P.laserOn = !P.laserOn; P.laserHold = null; $("tb-laser").classList.toggle("on", P.laserOn); },
+  timer: () => { $("timer-chip").hidden = !$("timer-chip").hidden; $("tb-timer").classList.toggle("on", !$("timer-chip").hidden); },
+  help: () => { $("help").hidden = !$("help").hidden; },
+};
+$("toolbar").addEventListener("click", e => e.stopPropagation());
+$("tb-back").onclick = () => exitDeck();
+$("tb-prev").onclick = () => prev();
+$("tb-next").onclick = () => next();
+for (const name of ["full", "notes", "laser", "timer", "help"]) $("tb-" + name).onclick = actions[name];
 
 addEventListener("keydown", e => {
   if ($("view-present").hidden || e.metaKey || e.ctrlKey) return;
@@ -327,12 +407,12 @@ addEventListener("keydown", e => {
   else if (["ArrowLeft", "ArrowUp", "PageUp", "Backspace"].includes(k)) { e.preventDefault(); prev(); }
   else if (k === "Home") go(firstVisible(0, 1));
   else if (k === "End") go(firstVisible(P.deck.slides.length - 1, -1));
-  else if (k === "f" || k === "F") { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
-  else if (k === "l" || k === "L") { P.laserOn = !P.laserOn; P.laserHold = null; $("view-present").classList.remove("pointer"); }
-  else if (k === "t" || k === "T") $("timer-chip").hidden = !$("timer-chip").hidden;
+  else if (k === "f" || k === "F") actions.full();
+  else if (k === "l" || k === "L") actions.laser();
+  else if (k === "t" || k === "T") actions.timer();
   else if (k === "d" || k === "D") $("hud").hidden = !$("hud").hidden;
-  else if (k === "h" || k === "H" || k === "?") $("help").hidden = !$("help").hidden;
-  else if (k === "p" || k === "P") window.open(location.pathname + "?presenter", "figma-presenter-notes", "width=1180,height=760");
+  else if (k === "h" || k === "H" || k === "?") actions.help();
+  else if (k === "p" || k === "P") actions.notes();
   else if (k === "Escape" && !document.fullscreenElement) exitDeck();
 });
 addEventListener("resize", () => { if (!$("view-present").hidden) layout(); });
@@ -386,6 +466,26 @@ function startPresenterWindow() {
     if (["ArrowRight", "ArrowDown", " ", "PageDown", "Enter"].includes(e.key)) { e.preventDefault(); channel.postMessage({ type: "go", delta: 1 }); }
     else if (["ArrowLeft", "ArrowUp", "PageUp", "Backspace"].includes(e.key)) { e.preventDefault(); channel.postMessage({ type: "go", delta: -1 }); }
   });
+  // Adjustable layout: drag the dividers, change the notes text size; remembered between sessions.
+  const root = $("view-presenter");
+  const saved = JSON.parse(localStorage.getItem("presenter.layout") || "{}");
+  const layoutState = { side: saved.side || 320, notes: saved.notes || 34, size: saved.size || 20 };
+  const applyLayout = () => {
+    root.style.setProperty("--side", layoutState.side + "px"); root.style.setProperty("--notes", layoutState.notes + "%"); root.style.setProperty("--notes-size", layoutState.size + "px");
+    localStorage.setItem("presenter.layout", JSON.stringify(layoutState));
+  };
+  applyLayout();
+  const drag = (handle, onMove) => handle.addEventListener("pointerdown", e => {
+    e.preventDefault(); handle.setPointerCapture(e.pointerId); handle.classList.add("drag");
+    const move = ev => { onMove(ev); applyLayout(); };
+    const up = () => { handle.classList.remove("drag"); handle.removeEventListener("pointermove", move); handle.removeEventListener("pointerup", up); };
+    handle.addEventListener("pointermove", move); handle.addEventListener("pointerup", up);
+  });
+  drag($("split-side"), ev => { const r = root.getBoundingClientRect(); layoutState.side = Math.round(Math.min(r.width - 220, Math.max(180, r.right - 16 - ev.clientX))); });
+  drag($("split-notes"), ev => { const r = root.getBoundingClientRect(); layoutState.notes = Math.round(Math.min(85, Math.max(8, (r.bottom - 16 - ev.clientY) / r.height * 100))); });
+  $("p-smaller").onclick = () => { layoutState.size = Math.max(12, layoutState.size - 2); applyLayout(); };
+  $("p-larger").onclick = () => { layoutState.size = Math.min(64, layoutState.size + 2); applyLayout(); };
+
   const img = $("p-cur");
   img.addEventListener("mousemove", e => {
     const r = img.getBoundingClientRect();

@@ -42,6 +42,20 @@ export class Repo {
     catch (err) { if (err.status === 404) return null; throw err; }
   }
 
+  // Files in a top-level folder of the repository: [{ name, sha }].
+  async list(dir) {
+    try { return (await (await this.request(`/contents/${dir}`)).json()).filter(e => e.type === "file").map(e => ({ name: e.name, sha: e.sha })); }
+    catch (err) { if (err.status === 404) return []; throw err; }
+  }
+
+  // Adds a binary file (a video) to the repository; returns its blob sha.
+  async putFile(path, bytes, message) {
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    const res = await this.request(`/contents/${path}`, undefined, { method: "PUT", body: JSON.stringify({ message, content: btoa(bin) }) });
+    return (await res.json()).content.sha;
+  }
+
   // Adds a shader source file (downloaded from Figma's code viewer) to the repository.
   async putShader(version, source) {
     const bytes = new TextEncoder().encode(source);

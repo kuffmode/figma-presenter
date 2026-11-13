@@ -6,10 +6,11 @@ const clamp01 = v => Math.min(1, Math.max(0, v));
 
 const QUAD_WGSL = /* wgsl */`
 struct U {
-  rect: vec4f,   // clip-space origin.xy, size.xy
+  box: vec4f,    // centre.xy and size.xy in slide px
+  xf: vec4f,     // cos, sin of the rotation (clockwise), slide width, slide height
   tint: vec4f,   // premultiplied colour multiplier
   misc: vec4f,   // opacity, mix between t0 and t1, corner radius (px), unused
-  size: vec4f,   // layer size in slide px
+  uv: vec4f,     // texture coordinate scale.xy, offset.xy
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var s: sampler;
@@ -18,19 +19,22 @@ struct U {
 struct V { @builtin(position) p: vec4f, @location(0) uv: vec2f };
 @vertex fn vs(@location(0) c: vec2f) -> V {
   var o: V;
-  o.p = vec4f(u.rect.xy + c * u.rect.zw, 0.0, 1.0);
+  let l = (c - vec2f(0.5)) * u.box.zw;
+  let p = u.box.xy + vec2f(l.x * u.xf.x - l.y * u.xf.y, l.x * u.xf.y + l.y * u.xf.x);
+  o.p = vec4f(p.x / u.xf.z * 2.0 - 1.0, 1.0 - p.y / u.xf.w * 2.0, 0.0, 1.0);
   o.uv = c;
   return o;
 }
 @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
-  let a = textureSampleLevel(t0, s, uv, 0.0);
-  let b = textureSampleLevel(t1, s, uv, 0.0);
+  let q = uv * u.uv.xy + u.uv.zw;
+  let a = textureSampleLevel(t0, s, q, 0.0);
+  let b = textureSampleLevel(t1, s, q, 0.0);
   var c = mix(a, b, u.misc.y) * u.tint;
   let r = u.misc.z;
   if (r > 0.0) {
-    let half = u.size.xy * 0.5;
-    let q = abs(uv * u.size.xy - half) - (half - vec2f(r));
-    let d = length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    let half = u.box.zw * 0.5;
+    let e = abs(uv * u.box.zw - half) - (half - vec2f(r));
+    let d = length(max(e, vec2f(0.0))) + min(max(e.x, e.y), 0.0) - r;
     c = c * clamp(0.5 - d, 0.0, 1.0);
   }
   return c * u.misc.x;
@@ -160,6 +164,8 @@ export class Engine {
     this.instances = new Map();     // layer object -> ShaderInstance
     this.staticOut = new Map();     // layer object -> { tex, key }
     this.modules = new Map();       // shader version -> module | null
+    this.videos = new Map();        // video hash -> { el, tex, view }
+    this.slideTex = null;
     this.plans = new Map();
     this.trash = [];
     this.uniforms = []; this.uniformCursor = 0;
@@ -206,7 +212,9 @@ export class Engine {
   clear() {
     for (const t of this.textures.values()) t.tex.destroy();
     for (const o of this.staticOut.values()) o.tex.destroy();
-    this.textures.clear(); this.staticOut.clear(); this.instances.clear(); this.plans.clear();
+    for (const v of this.videos.values()) { if (v.el) v.el.pause(); if (v.tex) v.tex.destroy(); }
+    this.textures.clear(); this.staticOut.clear(); this.instances.clear(); this.plans.clear(); this.videos.clear();
+    if (this.slideTex) this.slideTex.key = null;
   }
 
   resize(pxW, pxH) {
@@ -218,6 +226,7 @@ export class Engine {
     this.scale = this.pxW / this.deck.width;
     for (const o of this.staticOut.values()) o.tex.destroy();
     this.staticOut.clear();
+    if (this.slideTex) this.slideTex.key = null;
   }
 
   // Loads everything the given slides need (textures, shader modules and instances) and frees the rest.
@@ -227,12 +236,14 @@ export class Engine {
     for (const i of wanted) for (const layer of this.deck.slides[i].layers) {
       if (layer.asset) { keep.add(layer.asset); if (!this.textures.has(layer.asset)) jobs.push(this.loadTexture(layer.asset)); }
       if (layer.kind === "shader") jobs.push(this.loadInstance(layer));
+      if (layer.kind === "video") jobs.push(this.loadVideo(layer.video.hash));
     }
     await Promise.all(jobs);
     for (const [name, t] of this.textures) if (!keep.has(name)) { t.tex.destroy(); this.textures.delete(name); }
     const live = new Set(wanted.flatMap(i => this.deck.slides[i].layers));
     for (const [layer, o] of this.staticOut) if (!live.has(layer)) { o.tex.destroy(); this.staticOut.delete(layer); }
     for (const layer of this.instances.keys()) if (!live.has(layer)) this.instances.delete(layer);
+    if (this.slideTex) this.slideTex.key = null;
   }
 
   async loadTexture(name) {
@@ -275,7 +286,7 @@ export class Engine {
   // --- low-level drawing ---------------------------------------------------
   nextUniform() {
     if (this.uniformCursor === this.uniforms.length) {
-      this.uniforms.push({ buffer: this.device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }), data: new Float32Array(16) });
+      this.uniforms.push({ buffer: this.device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }), data: new Float32Array(20) });
     }
     return this.uniforms[this.uniformCursor++];
   }
@@ -293,7 +304,7 @@ export class Engine {
   // Copies (and rescales) a texture into another texture.
   blit(sourceView, target) {
     const u = this.nextUniform();
-    u.data.set([-1, 1, 2, -2, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0]);
+    u.data.set([0.5, 0.5, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0]);
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", clearValue: { r: 0, g: 0, b: 0, a: 0 }, storeOp: "store" }] });
     pass.setPipeline(this.copyPipeline);
@@ -347,22 +358,100 @@ export class Engine {
     return tex;
   }
 
+  // --- videos ----------------------------------------------------------------
+  async loadVideo(hash) {
+    if (this.videos.has(hash)) return;
+    this.videos.set(hash, { el: null, tex: null, view: null });
+    const el = this.loaders.video ? await this.loaders.video(hash).catch(() => null) : null;
+    const entry = this.videos.get(hash);
+    if (entry) entry.el = el;
+  }
+
+  // Copies the current video frame into a texture; returns it, or null while no frame is available.
+  videoFrame(hash) {
+    const v = this.videos.get(hash);
+    if (!v || !v.el || v.el.readyState < 2 || !v.el.videoWidth) return null;
+    const w = v.el.videoWidth, h = v.el.videoHeight;
+    if (!v.tex || v.w !== w || v.h !== h) {
+      if (v.tex) this.trash.push(v.tex);
+      v.tex = this.device.createTexture({ size: [w, h], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+      v.view = v.tex.createView(); v.w = w; v.h = h;
+    }
+    try { this.device.queue.copyExternalImageToTexture({ source: v.el }, { texture: v.tex, premultipliedAlpha: true }, [w, h]); }
+    catch (err) { return null; }
+    return v;
+  }
+
+  videoElements(index) {
+    return this.deck.slides[index].layers.filter(l => l.kind === "video").map(l => ({ layer: l, el: (this.videos.get(l.video.hash) || {}).el })).filter(x => x.el);
+  }
+
   // --- frame ---------------------------------------------------------------
-  // Draws the transition from slide a to slide b. g = eased progress for geometry (may overshoot),
-  // style = "SMART_ANIMATE" | "DISSOLVE". a === b draws a single slide.
+  // Draws the move from slide a to slide b. g = eased progress (springs may overshoot 1).
+  // a === b draws one slide. Smart animate tweens layers; every other style moves or fades whole slides.
   draw(a, b, g = 0, style = "SMART_ANIMATE", timeMs = 0, targetView = null) {
+    const target = targetView || this.ctx.getCurrentTexture().createView();
+    if (a === b || style === "SMART_ANIMATE") { this.drawLayers(a, b, g, timeMs, target); return; }
+    // Whole-slide transitions: draw each slide to its own picture once, then move the pictures.
+    const key = `${a}:${b}:${this.pxW}x${this.pxH}`;
+    if (!this.slideTex || this.slideTex.w !== this.pxW || this.slideTex.h !== this.pxH) {
+      if (this.slideTex) this.slideTex.tex.forEach(t => t.destroy());
+      const make = () => this.device.createTexture({ size: [this.pxW, this.pxH], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+      const tex = [make(), make()];
+      this.slideTex = { tex, views: tex.map(t => t.createView()), w: this.pxW, h: this.pxH, key: null };
+    }
+    if (this.slideTex.key !== key || this.isAnimated(a) || this.isAnimated(b)) {
+      this.drawLayers(a, a, 0, timeMs, this.slideTex.views[0]);
+      this.drawLayers(b, b, 0, timeMs, this.slideTex.views[1]);
+      this.slideTex.key = key;
+    }
+    const W = this.deck.width, H = this.deck.height, k = clamp01(g);
+    const m = /^(SLIDE_FROM|PUSH_FROM|MOVE_FROM|SLIDE_OUT_TO|MOVE_OUT_TO)_(LEFT|RIGHT|TOP|BOTTOM)$/.exec(style);
+    const side = m ? { LEFT: [-1, 0], RIGHT: [1, 0], TOP: [0, -1], BOTTOM: [0, 1] }[m[2]] : [0, 0];
+    // Each entry: which slide picture, its offset in slides, its opacity. Later entries are drawn on top.
+    let quads;
+    if (!m) quads = [[0, 0, 0, 1], [1, 0, 0, k]];                                             // dissolve
+    else if (m[1] === "PUSH_FROM") quads = [[0, -side[0] * g, -side[1] * g, 1], [1, side[0] * (1 - g), side[1] * (1 - g), 1]];
+    else if (m[1] === "MOVE_FROM") quads = [[0, 0, 0, 1], [1, side[0] * (1 - g), side[1] * (1 - g), 1]];
+    else if (m[1] === "SLIDE_FROM") quads = [[0, 0, 0, 1 - k], [1, side[0] * (1 - g), side[1] * (1 - g), 1]];
+    else if (m[1] === "MOVE_OUT_TO") quads = [[1, 0, 0, 1], [0, side[0] * g, side[1] * g, 1]];
+    else quads = [[1, 0, 0, 1], [0, side[0] * g, side[1] * g, 1 - k * k * k]];               // slide out: leaves while fading late
+    this.uniformCursor = 0;
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target, loadOp: "clear", clearValue: { r: 0, g: 0, b: 0, a: 1 }, storeOp: "store" }] });
+    pass.setVertexBuffer(0, this.quad);
+    pass.setPipeline(this.pipelines.NORMAL);
+    for (const [which, dx, dy, opacity] of quads) {
+      if (opacity <= 0) continue;
+      const u = this.nextUniform();
+      u.data.set([W / 2 + dx * W, H / 2 + dy * H, W, H, 1, 0, W, H, 1, 1, 1, 1, opacity, 0, 0, 0, 1, 1, 0, 0]);
+      const view = this.slideTex.views[which];
+      pass.setBindGroup(0, this.bind(u, view, view));
+      pass.draw(6);
+    }
+    pass.end();
+    this.device.queue.submit([encoder.finish()]);
+  }
+
+  drawLayers(a, b, g, timeMs, target) {
     const { device, deck } = this;
-    const k = clamp01(g);
+    const k = clamp01(g), moving = a !== b;
     const SA = deck.slides[a], SB = deck.slides[b];
-    const items = this.plan(a, b, style);
+    const items = this.plan(a, b, "SMART_ANIMATE");
     this.uniformCursor = 0;
     const draws = [];
 
     for (const it of items) {
       const { A, B } = it, L = B || A;
-      const matched = A && B && a !== b;
+      const matched = A && B && moving;
       let rect = matched ? A.rect.map((v, i) => lerp(v, B.rect[i], g)) : L.rect;
-      if (!matched && a !== b && style === "SMART_ANIMATE" && L.parent) {
+      let rot = L.rot || 0;
+      if (matched) {
+        const ra = A.rot || 0; let d = ((B.rot || 0) - ra) % 360;
+        if (d > 180) d -= 360; else if (d < -180) d += 360;
+        rot = ra + d * g;
+      }
+      if (!matched && moving && L.parent) {
         // A layer with no partner still travels with its container when the container has one.
         const ga = SA.groups && SA.groups[L.parent], gb = SB.groups && SB.groups[L.parent];
         if (ga && gb) {
@@ -370,9 +459,9 @@ export class Engine {
           rect = [lerp(ga[0], gb[0], g) + (L.rect[0] - own[0]), lerp(ga[1], gb[1], g) + (L.rect[1] - own[1]), L.rect[2], L.rect[3]];
         }
       }
-      const opacity = a === b || matched ? 1 : (B ? k : 1 - k);
+      const opacity = !moving || matched ? 1 : (B ? k : 1 - k);
       if (opacity <= 0 || rect[2] <= 0 || rect[3] <= 0) continue;
-      let view0 = this.white, view1 = this.white, mix = 0, tint = [1, 1, 1, 1], radius = 0;
+      let view0 = this.white, view1 = this.white, mix = 0, tint = [1, 1, 1, 1], radius = 0, uv = [1, 1, 0, 0];
 
       if (L.kind === "solid") {
         const ca = (A || B).color, cb = (B || A).color;
@@ -389,7 +478,7 @@ export class Engine {
           view0 = view1 = out ? out.createView() : plain.view;
         } else if (!instA || !instB || !srcA || !srcB) {
           if (!srcA || !srcB) continue;
-          view0 = srcA.view; view1 = srcB.view; mix = k;       // shader source missing: show the plain images
+          view0 = srcA.view; view1 = srcB.view; mix = k;       // shader code missing: show the plain pictures
         } else {
           const same = A.shader.version === B.shader.version;
           const defs = instA.defs;
@@ -406,28 +495,34 @@ export class Engine {
           }
         }
       } else {
-        const ta = A && this.textures.get(A.asset), tb = B && this.textures.get(B.asset);
-        if (!ta && !tb) continue;
-        view0 = (ta || tb).view; view1 = (tb || ta).view;
-        mix = matched && A.asset !== B.asset ? k : 0;
+        const frame = L.kind === "video" ? this.videoFrame(L.video.hash) : null;
+        if (frame) {
+          // Figma's "fill" mode: cover the layer, centred.
+          const va = frame.w / frame.h, la = rect[2] / rect[3];
+          uv = va > la ? [la / va, 1, (1 - la / va) / 2, 0] : [1, va / la, 0, (1 - va / la) / 2];
+          view0 = view1 = frame.view; radius = L.radius || 0;
+        } else {
+          const ta = A && this.textures.get(A.asset), tb = B && this.textures.get(B.asset);
+          if (!ta && !tb) continue;
+          view0 = (ta || tb).view; view1 = (tb || ta).view;
+          mix = matched && A.asset !== B.asset ? k : 0;
+        }
       }
 
-      const u = this.nextUniform();
+      const u = this.nextUniform(), rad = rot * Math.PI / 180;
       u.data.set([
-        rect[0] / deck.width * 2 - 1, 1 - rect[1] / deck.height * 2, rect[2] / deck.width * 2, -rect[3] / deck.height * 2,
+        rect[0] + rect[2] / 2, rect[1] + rect[3] / 2, rect[2], rect[3],
+        Math.cos(rad), Math.sin(rad), deck.width, deck.height,
         tint[0], tint[1], tint[2], tint[3],
         opacity, mix, radius, 0,
-        rect[2], rect[3], 0, 0,
+        uv[0], uv[1], uv[2], uv[3],
       ]);
       draws.push({ pipeline: this.pipelines[BLEND_ALIAS[L.blend] || "NORMAL"], group: this.bind(u, view0, view1) });
     }
 
     const bg = SA.background.map((v, i) => lerp(v, SB.background[i], k));
     const encoder = device.createCommandEncoder();
-    const pass = encoder.beginRenderPass({ colorAttachments: [{
-      view: targetView || this.ctx.getCurrentTexture().createView(),
-      loadOp: "clear", clearValue: { r: bg[0], g: bg[1], b: bg[2], a: 1 }, storeOp: "store",
-    }] });
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target, loadOp: "clear", clearValue: { r: bg[0], g: bg[1], b: bg[2], a: 1 }, storeOp: "store" }] });
     pass.setVertexBuffer(0, this.quad);
     for (const d of draws) { pass.setPipeline(d.pipeline); pass.setBindGroup(0, d.group); pass.draw(6); }
     pass.end();
@@ -436,8 +531,10 @@ export class Engine {
     this.trash.length = 0;
   }
 
-  // True when the slide needs redrawing every frame (it has a time-driven shader).
+  // True when the slide needs redrawing every frame (a time-driven shader or a playing video).
   isAnimated(index) {
-    return this.deck.slides[index].layers.some(l => l.kind === "shader" && l.shader.animated && this.instances.has(l));
+    return this.deck.slides[index].layers.some(l =>
+      (l.kind === "shader" && l.shader.animated && this.instances.has(l)) ||
+      (l.kind === "video" && (() => { const v = this.videos.get(l.video.hash); return v && v.el && !v.el.paused && !v.el.ended; })()));
   }
 }

@@ -22,6 +22,7 @@ const deck = { width: 1920, height: 1080, slides: [
     { key: "Container · 01", name: "box", kind: "solid", rect: [56,446,1670,188], color: [0,0,0,1], radius: 0, blend: "PASS_THROUGH" },
     { key: "Container · 01/Text · long", name: "t1", kind: "bitmap", rect: [66,456,1650,168], asset: "title1", blend: "PASS_THROUGH" },
     { key: "Text · Kayson Fakhar", name: "name", kind: "bitmap", rect: [56,651,282,48], asset: "name", blend: "PASS_THROUGH" },
+    { key: "Tilted", name: "tilt", kind: "shader", rect: [1100,700,400,300], rot: -20, blend: "PASS_THROUGH", asset: "photo", shader: { version: V, params: { ...base, colorMode: 1, inkOne: {r:0,g:0,b:0,a:1}, inkThree: {r:1,g:1,b:1,a:1} } } },
     { key: "Rectangle 14", name: "paper", kind: "bitmap", rect: [2,0,1918,1089], asset: "paper", blend: "MULTIPLY" },
   ] },
   { background: [1,1,1], layers: [
@@ -29,6 +30,7 @@ const deck = { width: 1920, height: 1080, slides: [
     { key: "Container · 01", name: "box", kind: "solid", rect: [32,33,795,76], color: [0,0,0,1], radius: 0, blend: "PASS_THROUGH" },
     { key: "Container · 01/Text · short", name: "t2", kind: "bitmap", rect: [42,43,775,56], asset: "title2", blend: "PASS_THROUGH" },
     { key: "Text · Noise", name: "label", kind: "bitmap", rect: [324,572,314,48], asset: "label", blend: "PASS_THROUGH" },
+    { key: "Tilted", name: "tilt", kind: "shader", rect: [1300,150,400,300], rot: 70, blend: "PASS_THROUGH", asset: "photo", shader: { version: V, params: { ...base, colorMode: 1, inkOne: {r:0,g:0,b:0,a:1}, inkThree: {r:1,g:1,b:1,a:1} } } },
     { key: "Image · Asset 02", name: "photo", kind: "shader", rect: [739,292,444,607], blend: "PASS_THROUGH", asset: "photo", shader: { version: V, params: { ...base, screenAngle: 22.5, inkDensity: 1.05, grainSize: 1.3, colorMode: 1, registration: .8, registrationAngle: 25, dotSize: 5, brightness: 0, inkSpread: .35, halftoneAmount: .27, contrast: 1.47, grainAmount: .07, printStyle: 0, inkOne: {r:0,g:0,b:0,a:1}, inkThree: {r:1,g:1,b:1,a:1} } } },
     { key: "Rectangle 14", name: "paper", kind: "bitmap", rect: [2,0,1918,1089], asset: "paper", blend: "MULTIPLY" },
   ] },
@@ -42,8 +44,8 @@ window.run = async (PW, PH, steps) => {
   await engine.prepare([0, 1]);
   const target = engine.device.createTexture({ size: [PW, PH], format: engine.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
   const out = [];
-  for (const [a, b, t] of steps) {
-    engine.draw(a, b, t, "SMART_ANIMATE", 0, target.createView());
+  for (const [a, b, t, style] of steps) {
+    engine.draw(a, b, t, style || "SMART_ANIMATE", 0, target.createView());
     const buf = engine.device.createBuffer({ size: PW * PH * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = engine.device.createCommandEncoder();
     enc.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow: PW * 4 }, [PW, PH]);

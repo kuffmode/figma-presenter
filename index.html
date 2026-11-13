@@ -42,6 +42,17 @@
 <section id="view-present" class="view" hidden>
   <canvas id="stage"></canvas>
   <canvas id="laser"></canvas>
+  <div id="toolbar">
+    <button id="tb-back" title="Back to decks (Esc)">← Decks</button>
+    <button id="tb-prev" title="Previous slide">‹</button>
+    <span id="tb-count"></span>
+    <button id="tb-next" title="Next slide">›</button>
+    <button id="tb-full" title="Full screen (F)">Full screen</button>
+    <button id="tb-notes" title="Presenter window (P)">Presenter view</button>
+    <button id="tb-laser" title="Laser pointer (L)">Laser</button>
+    <button id="tb-timer" title="Timer (T)">Timer</button>
+    <button id="tb-help" title="Keys (H)">?</button>
+  </div>
   <div id="timer-chip" hidden></div>
   <div id="hud" hidden></div>
   <div id="help" hidden>
@@ -53,9 +64,10 @@
 </section>
 
 <section id="view-presenter" class="view" hidden>
-  <div class="p-main">
-    <div class="p-current"><img id="p-cur" alt=""><div id="p-laser-hint">Move over the slide to point</div></div>
-    <div class="p-side">
+  <div class="p-top" id="p-top">
+    <div class="p-current"><img id="p-cur" alt=""><div id="p-dot" hidden></div><div id="p-laser-hint">Move over the slide to point</div></div>
+    <div class="split split-v" id="split-side" title="Drag to resize"></div>
+    <div class="p-side" id="p-side">
       <div class="p-next"><span>Next</span><img id="p-next" alt=""></div>
       <div class="p-clock"><div id="p-timer">0:00</div><div id="p-time"></div></div>
       <div class="row"><button id="p-toggle">Start</button><button id="p-reset">Reset</button></div>
@@ -63,7 +75,11 @@
       <div id="p-count"></div>
     </div>
   </div>
-  <div id="p-notes"></div>
+  <div class="split split-h" id="split-notes" title="Drag to resize"></div>
+  <div class="p-notes-wrap">
+    <div class="p-notes-bar"><span>Notes</span><button id="p-smaller" title="Smaller text">A−</button><button id="p-larger" title="Larger text">A+</button></div>
+    <div id="p-notes"></div>
+  </div>
 </section>
 
 <div id="toast" hidden></div>

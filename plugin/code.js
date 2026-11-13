@@ -70,11 +70,27 @@ function canDescend(node, forced) {
   return true;
 }
 
+// Rotation of a node on the slide, in degrees clockwise.
+function rotationOf(node) {
+  var t = node.absoluteTransform;
+  var deg = Math.atan2(t[1][0], t[0][0]) * 180 / Math.PI;
+  return Math.abs(deg) < 0.01 ? 0 : deg;
+}
+
+function topVideoFill(node) {
+  if (!('fills' in node) || node.fills === figma.mixed) return null;
+  var fills = visiblePaints(node.fills);
+  var top = fills[fills.length - 1];
+  return top && top.type === 'VIDEO' && top.videoHash ? top : null;
+}
+
 // Where an exported picture sits on the slide. The export covers the node's full painted area,
 // which can be larger than its box (shadows, strokes, text overhang).
-function placeExport(node, size, origin) {
+function placeExport(node, size, origin, upright) {
   var w = size.w / EXPORT_SCALE, h = size.h / EXPORT_SCALE;
   var bb = node.absoluteBoundingBox, rb = node.absoluteRenderBounds;
+  // A rotated layer is exported upright; it sits centred on the rotated layer's centre.
+  if (upright && bb) return [bb.x + bb.width / 2 - w / 2 - origin.x, bb.y + bb.height / 2 - h / 2 - origin.y, w, h];
   if (bb && Math.abs(bb.width - w) < 1 && Math.abs(bb.height - h) < 1) return [bb.x - origin.x, bb.y - origin.y, w, h];
   if (rb && Math.abs(rb.width - w) < 1.5 && Math.abs(rb.height - h) < 1.5) return [rb.x - origin.x, rb.y - origin.y, w, h];
   if (bb) return [bb.x + bb.width / 2 - w / 2 - origin.x, bb.y + bb.height / 2 - h / 2 - origin.y, w, h];
@@ -85,6 +101,26 @@ async function exportPng(node) {
   return node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: EXPORT_SCALE } });
 }
 
+// Exports a temporary copy of a layer: optionally without shader effects and upright.
+// The copy is placed where no slide clips it, and is always removed again.
+async function exportCopy(node, stripShaders, upright) {
+  var copy = null;
+  try {
+    copy = node.clone();
+    if (stripShaders) copy.effects = node.effects.filter(function (e) { return e.type !== 'SHADER'; });
+    if (upright) copy.rotation = 0;
+    if (copy.parent && copy.parent.type !== 'PAGE') { try { figma.currentPage.appendChild(copy); } catch (e) {} }
+    if (copy.parent && copy.parent.type === 'PAGE') { copy.x = -60000; copy.y = -60000; }
+    else if (copy.parent && 'width' in copy.parent) { copy.x = (copy.parent.width - copy.width) / 2; copy.y = (copy.parent.height - copy.height) / 2; }
+    var bytes = await exportPng(copy);
+    var got = pngSize(bytes);
+    if (got.w <= 2 && got.h <= 2 && node.width > 4 && node.height > 4) throw new Error('the copy could not be drawn');
+    return bytes;
+  } finally {
+    if (copy) { try { copy.remove(); } catch (e) {} }
+  }
+}
+
 function sendAsset(bytes, type) {
   var id = 'a' + (++assetCounter);
   post({ type: 'asset', id: id, bytes: bytes, mime: type });
@@ -93,18 +129,11 @@ function sendAsset(bytes, type) {
 
 async function exportShaderLayer(node, effect, ctx) {
   // The shader needs the layer's picture without the effect: export a temporary copy with shader effects removed.
-  var bytes = null, clone = null;
-  try {
-    clone = node.clone();
-    clone.effects = node.effects.filter(function (e) { return e.type !== 'SHADER'; });
-    bytes = await exportPng(clone);
-  } catch (err) {
-    warnings.push('"' + node.name + '": could not export without its shader (' + err.message + '); published with the effect baked in.');
-  } finally {
-    if (clone) { try { clone.remove(); } catch (e) {} }
-  }
+  var bytes = null, rot = rotationOf(node);
+  try { bytes = await exportCopy(node, true, !!rot); }
+  catch (err) { warnings.push('"' + node.name + '": could not export without its shader (' + err.message + '); published with the effect baked in.'); }
   if (!bytes) return exportBitmapLayer(node, ctx);
-  var rect = placeExport(node, pngSize(bytes), ctx.origin);
+  var rect = placeExport(node, pngSize(bytes), ctx.origin, !!rot);
   if (!rect) return null;
   var params = {};
   var meta = effect.propertyMetadata || {};
@@ -115,7 +144,7 @@ async function exportShaderLayer(node, effect, ctx) {
   var version = String(effect.id).split('/').pop();
   ctx.shaders[version] = true;
   if (visibleShaderEffects(node).length > 1) warnings.push('"' + node.name + '" has several shader effects; only the first is published.');
-  return { kind: 'shader', rect: rect, asset: sendAsset(bytes, 'image/png'), shader: { version: version, params: params } };
+  return { kind: 'shader', rect: rect, rot: rot, asset: sendAsset(bytes, 'image/png'), shader: { version: version, params: params } };
 }
 
 // A layer that reaches past the slide edge is cut off there when exported in place. Exporting a
@@ -127,20 +156,18 @@ function reachesPastSlide(node, ctx) {
 }
 
 async function exportBitmapLayer(node, ctx) {
-  var bytes = null;
-  if (ctx.slideBox && reachesPastSlide(node, ctx)) {
-    var copy = null;
-    try { copy = node.clone(); bytes = await exportPng(copy); }
-    catch (err) { bytes = null; }
-    finally { if (copy) { try { copy.remove(); } catch (e) {} } }
+  var bytes = null, rot = rotationOf(node), upright = false;
+  if (rot || (ctx.slideBox && reachesPastSlide(node, ctx))) {
+    try { bytes = await exportCopy(node, false, !!rot); upright = !!rot; }
+    catch (err) { bytes = null; upright = false; }
   }
   if (!bytes) {
     try { bytes = await exportPng(node); }
     catch (err) { warnings.push('"' + node.name + '" could not be exported: ' + err.message); return null; }
   }
-  var rect = placeExport(node, pngSize(bytes), ctx.origin);
+  var rect = placeExport(node, pngSize(bytes), ctx.origin, upright);
   if (!rect) return null;
-  return { kind: 'bitmap', rect: rect, asset: sendAsset(bytes, 'image/png') };
+  return { kind: 'bitmap', rect: rect, rot: upright ? rot : 0, asset: sendAsset(bytes, 'image/png') };
 }
 
 async function walk(node, path, parentKey, ctx) {
@@ -173,6 +200,14 @@ async function walk(node, path, parentKey, ctx) {
         continue;
       }
       layer = await exportBitmapLayer(child, ctx);
+      var video = layer ? topVideoFill(child) : null;
+      if (video) {
+        // The picture just exported is the video's current frame; the presenter swaps in the real video.
+        layer.kind = 'video';
+        layer.video = { hash: video.videoHash };
+        layer.radius = typeof child.cornerRadius === 'number' ? child.cornerRadius : 0;
+        ctx.videos[video.videoHash] = { name: child.name };
+      }
     }
     if (!layer) continue;
     layer.key = key; layer.name = child.name; layer.parent = parentKey;
@@ -181,9 +216,9 @@ async function walk(node, path, parentKey, ctx) {
   }
 }
 
-async function exportSlide(slide, shaders) {
+async function exportSlide(slide, shaders, videos) {
   var t = slide.absoluteTransform;
-  var ctx = { origin: { x: t[0][2], y: t[1][2] }, slideBox: { x: t[0][2], y: t[1][2], width: slide.width, height: slide.height }, layers: [], groups: {}, shaders: shaders };
+  var ctx = { origin: { x: t[0][2], y: t[1][2] }, slideBox: { x: t[0][2], y: t[1][2], width: slide.width, height: slide.height }, layers: [], groups: {}, shaders: shaders, videos: videos };
   var hasMask = slide.children.some(function (c) { return c.isMask; });
   if (hasMask) {
     warnings.push('Slide "' + slide.name + '" uses a mask at the top level; it is published as one flat picture.');
@@ -205,7 +240,7 @@ async function exportSlide(slide, shaders) {
     var tr = slide.getSlideTransition();
     transition = { style: tr.style, duration: tr.duration, curve: tr.curve, timing: tr.timing };
   } catch (e) {}
-  var thumb = await slide.exportAsync({ format: 'JPG', constraint: { type: 'WIDTH', value: 480 } });
+  var thumb = await slide.exportAsync({ format: 'JPG', constraint: { type: 'WIDTH', value: 800 } });
   return {
     id: slide.id, name: slide.name, notes: slide.speakerNotes || '', skipped: !!slide.isSkippedSlide,
     background: background, transition: transition, thumb: sendAsset(thumb, 'image/jpeg'),
@@ -226,10 +261,11 @@ async function publish() {
     figma.root.setPluginData('presenterDeckId', id);
   }
   var shaders = {};
+  var videos = {};
   var out = [];
   for (var i = 0; i < slides.length; i++) {
     post({ type: 'progress', stage: 'export', done: i, total: slides.length });
-    out.push(await exportSlide(slides[i], shaders));
+    out.push(await exportSlide(slides[i], shaders, videos));
   }
   var names = {};
   try {
@@ -241,7 +277,7 @@ async function publish() {
     type: 'deck', warnings: warnings,
     deck: {
       version: 1, id: id, name: figma.root.name, width: slides[0].width, height: slides[0].height,
-      exportScale: EXPORT_SCALE, publishedAt: new Date().toISOString(), shaders: names, slides: out
+      exportScale: EXPORT_SCALE, publishedAt: new Date().toISOString(), shaders: names, videos: videos, slides: out
     }
   });
 }
