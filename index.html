@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Figma Presenter</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="app/style.css">
+</head>
+<body>
+
+<section id="view-setup" class="view panel" hidden>
+  <div class="card">
+    <h1>Connect your decks</h1>
+    <p>Decks are published from Figma into a private GitHub repository. Enter that repository and an access token that can read it. Both stay in this browser.</p>
+    <label>Decks repository<input id="cfg-repo" placeholder="owner/repository" autocomplete="off" spellcheck="false"></label>
+    <label>Access token<input id="cfg-token" type="password" placeholder="github_pat_…" autocomplete="off" spellcheck="false"></label>
+    <div class="row"><button class="primary" id="cfg-save">Save</button><button id="cfg-cancel" hidden>Cancel</button></div>
+    <p class="msg" id="cfg-msg"></p>
+  </div>
+</section>
+
+<section id="view-library" class="view" hidden>
+  <header>
+    <h1>Decks</h1>
+    <span id="lib-status"></span>
+    <button id="lib-refresh">Refresh</button>
+    <button id="lib-settings">Settings</button>
+  </header>
+  <div id="deck-grid"></div>
+  <p id="lib-empty" hidden>No decks yet. Run the Publish plugin in a Figma Slides file.</p>
+</section>
+
+<section id="view-loading" class="view panel" hidden>
+  <div class="card center">
+    <h1 id="load-title">Loading…</h1>
+    <div class="bar"><div id="load-bar"></div></div>
+    <p id="load-text"></p>
+  </div>
+</section>
+
+<section id="view-present" class="view" hidden>
+  <canvas id="stage"></canvas>
+  <canvas id="laser"></canvas>
+  <div id="timer-chip" hidden></div>
+  <div id="hud" hidden></div>
+  <div id="help" hidden>
+    <b>Keys</b>
+    <span>→ Space</span><i>next</i><span>←</span><i>back</i><span>Home / End</span><i>first / last</i>
+    <span>F</span><i>full screen</i><span>P</span><i>presenter window</i><span>L</span><i>laser pointer</i>
+    <span>T</span><i>timer</i><span>D</span><i>frame times</i><span>Esc</span><i>back to decks</i><span>H</span><i>this help</i>
+  </div>
+</section>
+
+<section id="view-presenter" class="view" hidden>
+  <div class="p-main">
+    <div class="p-current"><img id="p-cur" alt=""><div id="p-laser-hint">Move over the slide to point</div></div>
+    <div class="p-side">
+      <div class="p-next"><span>Next</span><img id="p-next" alt=""></div>
+      <div class="p-clock"><div id="p-timer">0:00</div><div id="p-time"></div></div>
+      <div class="row"><button id="p-toggle">Start</button><button id="p-reset">Reset</button></div>
+      <div class="row"><button id="p-prev">← Back</button><button class="primary" id="p-fwd">Next →</button></div>
+      <div id="p-count"></div>
+    </div>
+  </div>
+  <div id="p-notes"></div>
+</section>
+
+<div id="toast" hidden></div>
+<script type="module" src="app/main.js"></script>
+</body>
+</html>

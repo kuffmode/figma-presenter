@@ -1,0 +1,13 @@
+{
+  "name": "Publish to Presenter",
+  "id": "figma-presenter-publish",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["slides"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["https://api.github.com"],
+    "reasoning": "Uploads the exported deck to your private GitHub repository."
+  }
+}
